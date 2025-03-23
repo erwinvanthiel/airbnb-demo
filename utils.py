@@ -4,6 +4,7 @@ from typing import List, Tuple
 import pandas as pd
 import numpy as np
 from sentence_transformers import SentenceTransformer
+import ast
 
 def embed(df: pd.DataFrame, text_columns: List[str], embedding_model: SentenceTransformer) -> pd.DataFrame:
     """Transforms input by replacing text columns with embeddings"""
@@ -32,7 +33,9 @@ def one_hot_encode(column_name: str, df: pd.DataFrame, encoder: OneHotEncoder) -
 
 def multi_hot_encode(column_name: str, df: pd.DataFrame, encoder: MultiLabelBinarizer) -> pd.DataFrame:
     """Multi hot encodes a categorical column"""
-    multi_hot_encoded = encoder.transform(np.array(df[[column_name]]))
-    mhe_df = pd.DataFrame(multi_hot_encoded, columns=encoder.classes_)
+    # Safely parse if values are strings like "['foo', 'bar']"
+    df[column_name] = df[column_name].apply(lambda x: ast.literal_eval(x) if isinstance(x, str) else x)
+    multi_hot_encoded = encoder.transform(np.array(df[[column_name]]).flatten())
+    mhe_df = pd.DataFrame(multi_hot_encoded, columns=encoder.classes_, index=df.index)
     df_transformed = df.drop(columns=[column_name])
     return pd.concat([df_transformed, mhe_df], axis=1)

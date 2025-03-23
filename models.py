@@ -13,21 +13,47 @@ import joblib
 import os
 from pathlib import Path
 from utils import embed, one_hot_encode, multi_hot_encode
+import json
 
 # This is a simple fully connected layered NN a.k.a MultiLayer Perceptron
 class SimpleNNRegressor(nn.Module):
-    def __init__(self, input_size, hidden_size=128, output_size=1):
+    def __init__(self, input_size, device=None):
         super(SimpleNNRegressor, self).__init__()
-        self.fc1 = nn.Linear(input_size, hidden_size)
-        self.relu = nn.ReLU()
-        self.fc2 = nn.Linear(hidden_size, output_size)
-    
+        self.device = device or torch.device("cpu")
+
+        self.model = nn.Sequential(
+            nn.Linear(input_size, 512),
+            nn.BatchNorm1d(512),
+            nn.GELU(),
+            nn.Dropout(0.3),
+
+            nn.Linear(512, 256),
+            nn.BatchNorm1d(256),
+            nn.GELU(),
+            nn.Dropout(0.3),
+
+            nn.Linear(256, 128),
+            nn.BatchNorm1d(128),
+            nn.GELU(),
+
+            nn.Linear(128, 64),
+            nn.GELU(),
+
+            nn.Linear(64, 1)
+        )
+
+        self.model.to(self.device)
+        self._initialize_weights()
+
+    def _initialize_weights(self):
+        for m in self.model:
+            if isinstance(m, nn.Linear):
+                nn.init.xavier_uniform_(m.weight)
+                nn.init.zeros_(m.bias)
+
     def forward(self, x):
-        x = x.float()
-        x = self.fc1(x)
-        x = self.relu(x)
-        x = self.fc2(x)
-        return x
+        x = x.to(self.device).float()
+        return self.model(x)
     
 # This is a MLFlow wrapper for a model. It stores and loads the required models and performs the required preprocessing steps. Loading of the predictive model and the inference method is to be implemented by concrete child because sklearn and pytorch models for exmaple have different inference and loading mechanisms. It works with an artifacts object that depicts the locations of the stored models. This artifact object is used to load the model dependencies when its served by MLFlow.
 class PreprocessWrapper(mlflow.pyfunc.PythonModel, ABC):
@@ -48,8 +74,8 @@ class PreprocessWrapper(mlflow.pyfunc.PythonModel, ABC):
         self.ohe_columns = ohe_columns
         self.mhe_columns = mhe_columns
         self.embedding_model_path = embedding_model_path
+        self.embedding_model = SentenceTransformer(embedding_model_path) if self.embedding_model_path else None
         self.model = None
-        self.embedding_model = None
 
         # the file paths for the sklearn models
         self.scaler_paths: List[Tuple[str, str]] = []
@@ -85,7 +111,7 @@ class PreprocessWrapper(mlflow.pyfunc.PythonModel, ABC):
             multihot_encoder_path = str(multihot_encoder_path)
             joblib.dump(mhe_encoder, multihot_encoder_path)
             self.multihot_encoder_paths.append((col_name, multihot_encoder_path))
-
+    
     def load_context(self, context):
         """
         Loads preprocessing models and metadata from MLflow artifacts.
@@ -98,8 +124,8 @@ class PreprocessWrapper(mlflow.pyfunc.PythonModel, ABC):
             metadata = json.load(f)
 
         # Get paths from metadata
-        self.ohe_columns = metadata["ohe_columns"]
-        self.mhe_columns = metadata["mhe_columns"]
+        self.ohe_columns = metadata["onehot_encoder_paths"]
+        self.mhe_columns = metadata["multihot_encoder_paths"]
         self.scaler_paths = metadata["scaler_paths"]
 
         # Load models from path
@@ -110,7 +136,7 @@ class PreprocessWrapper(mlflow.pyfunc.PythonModel, ABC):
         
         # Load embedding model if present
         if "embedding_model_path" in context.artifacts:
-            self.embedding_model = SentenceTransformer(context.artifacts["embedding_model"])
+            self.embedding_model = SentenceTransformer(context.artifacts["embedding_model_path"])
     
     def predict(self, context, model_input: pd.DataFrame) -> pd.Series:
         """
@@ -126,14 +152,14 @@ class PreprocessWrapper(mlflow.pyfunc.PythonModel, ABC):
         processed_model_input = model_input
         for (col, scaler) in self.scalers:
             processed_model_input[col] = scaler.transform(processed_model_input[[col]])
-        for col in self.text_columns:
-            if self.embedding_model_path:
-                processed_model_input = embed(processed_model_input, self.text_columns, self.embedding_model)
-            processed_model_input = processed_model_input.drop(columns=[col])
         for col, encoder in self.onehot_encoders:
             processed_model_input = one_hot_encode(col, processed_model_input, encoder)
         for col, encoder in self.multihot_encoders:
             processed_model_input = multi_hot_encode(col, processed_model_input, encoder)
+        if self.embedding_model_path:
+            processed_model_input = embed(processed_model_input, self.text_columns, self.embedding_model)
+        else:
+            processed_model_input = processed_model_input.drop(columns=self.text_columns)
         return self.infere(processed_model_input)
     
     @abstractmethod
@@ -165,18 +191,18 @@ class SklearnRegressorPreprocessWrapper(PreprocessWrapper):
         return pd.Series(predictions, index=model_input.index)
 
     def load_model_from_path(self, path):
-        self.model: BaseEstimator = joblib.load(model_path)
+        self.model: BaseEstimator = joblib.load(path)
 
 # This is an mflow model wrapper for a pytorch DNN regression model
 class TorchNNPreprocessWrapper(PreprocessWrapper):
     def __init__(self, model: torch.nn.Module, text_columns: List[str], ohe_columns: List[Tuple[str, OneHotEncoder]], mhe_columns: List[Tuple[str, MultiLabelBinarizer]], embedding_model_path: str, scale_columns: List[Tuple[str, MinMaxScaler]], artifact_base_path: str):
         """Save model to disk and initialize wrapper with model path."""
-        self.model_path = (Path(artifact_base_path) / "models" /  f"{type(model).__name__}.pkl").resolve()
-        os.makedirs(self.model_path.parent, exist_ok=True)
-        self.model_path = str(self.model_path)
-        joblib.dump(model, self.model_path)
+        model_path = (Path(artifact_base_path) / "models" /  f"{type(model).__name__}.pkl").resolve()
+        os.makedirs(model_path.parent, exist_ok=True)
+        joblib.dump(model, model_path)
         super().__init__(text_columns, ohe_columns, mhe_columns, embedding_model_path, scale_columns, artifact_base_path)
         self.model = model
+        self.model_path = str(model_path)
 
     def infere(self, model_input: pd.DataFrame) -> pd.Series:
         """Perform inference using the loaded PyTorch model."""
@@ -193,8 +219,8 @@ class TorchNNPreprocessWrapper(PreprocessWrapper):
             predictions = self.model(input_tensor)
         
         # Convert predictions to pandas Series
-        return pd.Series(predictions.numpy().flatten(), index=model_input.index)
+        return pd.Series(predictions.detach().cpu().numpy().flatten(), index=model_input.index)
 
     def load_model_from_path(self, path: str):
         """Load a PyTorch model from a file."""
-        self.model = torch.load(path)  # Load the saved PyTorch model
+        self.model = torch.load(path)
