@@ -6,8 +6,8 @@ import numpy as np
 import mlflow
 from sentence_transformers import SentenceTransformer
 from abc import ABC, abstractmethod
-from sklearn.preprocessing import MinMaxScaler, OneHotEncoder, MultiLabelBinarizer
-from sklearn.base import BaseEstimator
+from sklearn.preprocessing import OneHotEncoder, MultiLabelBinarizer
+from sklearn.base import BaseEstimator, TransformerMixin
 import pickle
 import joblib
 import os
@@ -23,23 +23,19 @@ class SimpleNNRegressor(nn.Module):
 
         self.model = nn.Sequential(
             nn.Linear(input_size, 512),
-            nn.BatchNorm1d(512),
-            nn.GELU(),
-            nn.Dropout(0.3),
+            nn.ReLU(),
 
             nn.Linear(512, 256),
-            nn.BatchNorm1d(256),
-            nn.GELU(),
-            nn.Dropout(0.3),
+            nn.ReLU(),
 
             nn.Linear(256, 128),
-            nn.BatchNorm1d(128),
-            nn.GELU(),
+            nn.ReLU(),
 
             nn.Linear(128, 64),
-            nn.GELU(),
+            nn.ReLU(),
 
-            nn.Linear(64, 1)
+            nn.Linear(64, 1),
+            nn.Sigmoid()
         )
 
         self.model.to(self.device)
@@ -57,7 +53,7 @@ class SimpleNNRegressor(nn.Module):
     
 # This is a MLFlow wrapper for a model. It stores and loads the required models and performs the required preprocessing steps. Loading of the predictive model and the inference method is to be implemented by concrete child because sklearn and pytorch models for exmaple have different inference and loading mechanisms. It works with an artifacts object that depicts the locations of the stored models. This artifact object is used to load the model dependencies when its served by MLFlow.
 class PreprocessWrapper(mlflow.pyfunc.PythonModel, ABC):
-    def __init__(self, text_columns: List[str], ohe_columns: List[Tuple[str, OneHotEncoder]], mhe_columns: List[Tuple[str, MultiLabelBinarizer]], embedding_model_path: str, scale_columns: List[Tuple[str, MinMaxScaler]], artifact_base_path: str):
+    def __init__(self, text_columns: List[str], ohe_columns: List[Tuple[str, OneHotEncoder]], mhe_columns: List[Tuple[str, MultiLabelBinarizer]], embedding_model_path: str, scale_columns: List[Tuple[str, TransformerMixin]], artifact_base_path: str):
         """
         Initializes the wrapper and stores preprocessing artifacts.
 
@@ -174,7 +170,7 @@ class PreprocessWrapper(mlflow.pyfunc.PythonModel, ABC):
 
 # This is an mflow model wrapper for an sklearn regression model
 class SklearnRegressorPreprocessWrapper(PreprocessWrapper):
-    def __init__(self, model: BaseEstimator, text_columns: List[str], ohe_columns: List[Tuple[str, OneHotEncoder]], mhe_columns: List[Tuple[str, MultiLabelBinarizer]], scale_columns: List[Tuple[str, MinMaxScaler]], artifact_base_path: str):
+    def __init__(self, model: BaseEstimator, text_columns: List[str], ohe_columns: List[Tuple[str, OneHotEncoder]], mhe_columns: List[Tuple[str, MultiLabelBinarizer]], scale_columns: List[Tuple[str, TransformerMixin]], artifact_base_path: str):
         """Save model to disk and initialize wrapper with model path."""
         self.model_path = (Path(artifact_base_path) / "models" /  f"{type(model).__name__}.pkl").resolve()
         os.makedirs(self.model_path.parent, exist_ok=True)
@@ -188,14 +184,14 @@ class SklearnRegressorPreprocessWrapper(PreprocessWrapper):
         if not isinstance(model_input, pd.DataFrame):
             raise ValueError("Input data must be a pandas DataFrame")
         predictions = self.model.predict(model_input)
-        return pd.Series(predictions, index=model_input.index)
+        return pd.Series(predictions.squeeze(), index=model_input.index)
 
     def load_model_from_path(self, path):
         self.model: BaseEstimator = joblib.load(path)
 
 # This is an mflow model wrapper for a pytorch DNN regression model
 class TorchNNPreprocessWrapper(PreprocessWrapper):
-    def __init__(self, model: torch.nn.Module, text_columns: List[str], ohe_columns: List[Tuple[str, OneHotEncoder]], mhe_columns: List[Tuple[str, MultiLabelBinarizer]], embedding_model_path: str, scale_columns: List[Tuple[str, MinMaxScaler]], artifact_base_path: str):
+    def __init__(self, model: torch.nn.Module, text_columns: List[str], ohe_columns: List[Tuple[str, OneHotEncoder]], mhe_columns: List[Tuple[str, MultiLabelBinarizer]], embedding_model_path: str, scale_columns: List[Tuple[str, TransformerMixin]], artifact_base_path: str):
         """Save model to disk and initialize wrapper with model path."""
         model_path = (Path(artifact_base_path) / "models" /  f"{type(model).__name__}.pkl").resolve()
         os.makedirs(model_path.parent, exist_ok=True)

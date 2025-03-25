@@ -1,5 +1,4 @@
-from sklearn.preprocessing import MinMaxScaler, OneHotEncoder, MultiLabelBinarizer
-from sklearn.base import BaseEstimator
+from sklearn.preprocessing import OneHotEncoder, MultiLabelBinarizer
 from typing import List, Tuple
 import pandas as pd
 import numpy as np
